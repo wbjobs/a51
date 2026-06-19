@@ -5,8 +5,12 @@ const { getDb } = require('../database');
 const router = express.Router();
 const db = getDb();
 
-function findAvailableRoom(capacity, startTime, endTime) {
-  const rooms = db.prepare(`
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function findAvailableRoomTx(tx, capacity, startTime, endTime) {
+  const rooms = tx.prepare(`
     SELECT r.id, r.name, r.capacity
     FROM rooms r
     WHERE r.capacity >= ?
@@ -24,7 +28,52 @@ function findAvailableRoom(capacity, startTime, endTime) {
   return rooms || null;
 }
 
-router.post('/', (req, res) => {
+async function createMeetingWithRetry(data, maxRetries = 5) {
+  const { title, organizer, participantCount, startTime, endTime } = data;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const tx = db.transaction(() => {
+        const room = findAvailableRoomTx(db, participantCount, startTime, endTime);
+
+        if (!room) {
+          return { error: '没有符合条件的可用会议室', status: 409 };
+        }
+
+        const meetingId = uuidv4();
+
+        db.prepare(`
+          INSERT INTO meetings (id, room_id, title, organizer, participant_count, start_time, end_time, status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled')
+        `).run(meetingId, room.id, title, organizer, participantCount, startTime, endTime);
+
+        const meeting = db.prepare(`
+          SELECT m.*, r.name as room_name, r.capacity as room_capacity
+          FROM meetings m
+          JOIN rooms r ON m.room_id = r.id
+          WHERE m.id = ?
+        `).get(meetingId);
+
+        return { meeting };
+      });
+
+      const result = tx();
+      return result;
+    } catch (err) {
+      if (err.code === 'SQLITE_BUSY' || err.message?.includes('database is locked')) {
+        if (attempt < maxRetries - 1) {
+          await sleep(50 + attempt * 100);
+          continue;
+        }
+      }
+      throw err;
+    }
+  }
+
+  return { error: '服务器繁忙，请稍后重试', status: 503 };
+}
+
+router.post('/', async (req, res) => {
   const { title, organizer, participantCount, startTime, endTime } = req.body;
 
   if (!title || !organizer || !participantCount || !startTime || !endTime) {
@@ -42,27 +91,24 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: '参会人数至少为1人' });
   }
 
-  const room = findAvailableRoom(participantCount, startTime, endTime);
+  try {
+    const result = await createMeetingWithRetry({
+      title,
+      organizer,
+      participantCount,
+      startTime,
+      endTime,
+    });
 
-  if (!room) {
-    return res.status(409).json({ error: '没有符合条件的可用会议室' });
+    if (result.error) {
+      return res.status(result.status || 409).json({ error: result.error });
+    }
+
+    res.status(201).json(result.meeting);
+  } catch (err) {
+    console.error('创建会议失败:', err);
+    res.status(500).json({ error: '服务器内部错误' });
   }
-
-  const meetingId = uuidv4();
-
-  db.prepare(`
-    INSERT INTO meetings (id, room_id, title, organizer, participant_count, start_time, end_time, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled')
-  `).run(meetingId, room.id, title, organizer, participantCount, startTime, endTime);
-
-  const meeting = db.prepare(`
-    SELECT m.*, r.name as room_name, r.capacity as room_capacity
-    FROM meetings m
-    JOIN rooms r ON m.room_id = r.id
-    WHERE m.id = ?
-  `).get(meetingId);
-
-  res.status(201).json(meeting);
 });
 
 router.get('/', (req, res) => {
@@ -106,51 +152,71 @@ router.get('/:id', (req, res) => {
 router.post('/:id/start', (req, res) => {
   const { id } = req.params;
 
-  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(id);
+  const tx = db.transaction(() => {
+    const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(id);
 
-  if (!meeting) {
-    return res.status(404).json({ error: '会议不存在' });
+    if (!meeting) {
+      return { error: '会议不存在', status: 404 };
+    }
+
+    if (meeting.status === 'ended') {
+      return { error: '会议已结束', status: 400 };
+    }
+
+    db.prepare("UPDATE meetings SET status = 'active' WHERE id = ?").run(id);
+
+    const updatedMeeting = db.prepare(`
+      SELECT m.*, r.name as room_name, r.capacity as room_capacity
+      FROM meetings m
+      JOIN rooms r ON m.room_id = r.id
+      WHERE m.id = ?
+    `).get(id);
+
+    return { meeting: updatedMeeting };
+  });
+
+  const result = tx();
+
+  if (result.error) {
+    return res.status(result.status).json({ error: result.error });
   }
 
-  if (meeting.status === 'ended') {
-    return res.status(400).json({ error: '会议已结束' });
-  }
-
-  db.prepare("UPDATE meetings SET status = 'active' WHERE id = ?").run(id);
-
-  const updatedMeeting = db.prepare(`
-    SELECT m.*, r.name as room_name, r.capacity as room_capacity
-    FROM meetings m
-    JOIN rooms r ON m.room_id = r.id
-    WHERE m.id = ?
-  `).get(id);
-
-  res.json(updatedMeeting);
+  res.json(result.meeting);
 });
 
 router.post('/:id/end', (req, res) => {
   const { id } = req.params;
 
-  const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(id);
+  const tx = db.transaction(() => {
+    const meeting = db.prepare('SELECT * FROM meetings WHERE id = ?').get(id);
 
-  if (!meeting) {
-    return res.status(404).json({ error: '会议不存在' });
+    if (!meeting) {
+      return { error: '会议不存在', status: 404 };
+    }
+
+    if (meeting.status === 'ended') {
+      return { error: '会议已经结束', status: 400 };
+    }
+
+    db.prepare("UPDATE meetings SET status = 'ended' WHERE id = ?").run(id);
+
+    const updatedMeeting = db.prepare(`
+      SELECT m.*, r.name as room_name, r.capacity as room_capacity
+      FROM meetings m
+      JOIN rooms r ON m.room_id = r.id
+      WHERE m.id = ?
+    `).get(id);
+
+    return { meeting: updatedMeeting };
+  });
+
+  const result = tx();
+
+  if (result.error) {
+    return res.status(result.status).json({ error: result.error });
   }
 
-  if (meeting.status === 'ended') {
-    return res.status(400).json({ error: '会议已经结束' });
-  }
-
-  db.prepare("UPDATE meetings SET status = 'ended' WHERE id = ?").run(id);
-
-  const updatedMeeting = db.prepare(`
-    SELECT m.*, r.name as room_name, r.capacity as room_capacity
-    FROM meetings m
-    JOIN rooms r ON m.room_id = r.id
-    WHERE m.id = ?
-  `).get(id);
-
-  res.json(updatedMeeting);
+  res.json(result.meeting);
 });
 
 router.get('/rooms/available', (req, res) => {

@@ -42,6 +42,7 @@ function initDatabase() {
       text TEXT,
       points TEXT,
       created_by TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
@@ -49,6 +50,12 @@ function initDatabase() {
 
     CREATE INDEX IF NOT EXISTS idx_meetings_room_time ON meetings(room_id, start_time, end_time);
     CREATE INDEX IF NOT EXISTS idx_whiteboard_meeting ON whiteboard_elements(meeting_id);
+
+    CREATE TABLE IF NOT EXISTS meeting_versions (
+      meeting_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
   `);
 
   const roomCount = db.prepare('SELECT COUNT(*) as count FROM rooms').get().count;

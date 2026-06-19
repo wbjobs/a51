@@ -31,42 +31,114 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
   const [dragging, setDragging] = useState(null)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
   const elementsRef = useRef([])
+  const serverVersionRef = useRef(0)
+  const initializedRef = useRef(false)
+  const processedOpIdsRef = useRef(new Set())
+  const pendingLocalOpsRef = useRef(new Map())
+
+  useEffect(() => {
+    elementsRef.current = elements
+  }, [elements])
 
   useEffect(() => {
     if (!socket) return
 
     const handleInit = (data) => {
-      setElements(data.elements || [])
-      elementsRef.current = data.elements || []
+      const serverElements = data.elements || []
+      serverVersionRef.current = data.serverVersion || 0
+
+      if (initializedRef.current) {
+        setElements(prev => {
+          const localIds = new Set(prev.map(el => el.id))
+          const serverIds = new Set(serverElements.map(el => el.id))
+          const merged = [
+            ...prev.filter(el => !serverIds.has(el.id)),
+            ...serverElements,
+          ]
+          elementsRef.current = merged
+          return merged
+        })
+        return
+      }
+
+      initializedRef.current = true
+      setElements(serverElements)
+      elementsRef.current = serverElements
     }
 
-    const handleAdd = (element) => {
+    const handleAdd = ({ opId, element, version }) => {
+      if (opId && processedOpIdsRef.current.has(opId)) {
+        return
+      }
+      if (opId) {
+        processedOpIdsRef.current.add(opId)
+      }
+      if (version !== undefined) {
+        serverVersionRef.current = Math.max(serverVersionRef.current, version)
+      }
+
       setElements(prev => {
+        if (prev.some(el => el.id === element.id)) {
+          return prev
+        }
         const next = [...prev, element]
-        elementsRef.current = next
         return next
       })
     }
 
-    const handleUpdate = (element) => {
+    const handleUpdate = ({ opId, element, version }) => {
+      if (opId && processedOpIdsRef.current.has(opId)) {
+        return
+      }
+      if (opId) {
+        processedOpIdsRef.current.add(opId)
+      }
+      if (version !== undefined) {
+        serverVersionRef.current = Math.max(serverVersionRef.current, version)
+      }
+
       setElements(prev => {
-        const next = prev.map(el => el.id === element.id ? element : el)
-        elementsRef.current = next
+        const idx = prev.findIndex(el => el.id === element.id)
+        if (idx === -1) return prev
+        const next = [...prev]
+        next[idx] = element
         return next
       })
     }
 
-    const handleDelete = ({ elementId }) => {
-      setElements(prev => {
-        const next = prev.filter(el => el.id !== elementId)
-        elementsRef.current = next
-        return next
-      })
+    const handleDelete = ({ opId, elementId, version }) => {
+      if (opId && processedOpIdsRef.current.has(opId)) {
+        return
+      }
+      if (opId) {
+        processedOpIdsRef.current.add(opId)
+      }
+      if (version !== undefined) {
+        serverVersionRef.current = Math.max(serverVersionRef.current, version)
+      }
+
+      setElements(prev => prev.filter(el => el.id !== elementId))
     }
 
-    const handleClear = () => {
+    const handleClear = ({ opId, version }) => {
+      if (opId && processedOpIdsRef.current.has(opId)) {
+        return
+      }
+      if (opId) {
+        processedOpIdsRef.current.add(opId)
+      }
+      if (version !== undefined) {
+        serverVersionRef.current = Math.max(serverVersionRef.current, version)
+      }
+      initializedRef.current = true
       setElements([])
-      elementsRef.current = []
+    }
+
+    const handleAck = ({ opId, elementId, version }) => {
+      if (version !== undefined) {
+        serverVersionRef.current = Math.max(serverVersionRef.current, version)
+      }
+      pendingLocalOpsRef.current.delete(opId)
     }
 
     socket.on('whiteboard-init', handleInit)
@@ -74,6 +146,10 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     socket.on('whiteboard-update', handleUpdate)
     socket.on('whiteboard-delete', handleDelete)
     socket.on('whiteboard-clear', handleClear)
+    socket.on('whiteboard-add-ack', handleAck)
+    socket.on('whiteboard-update-ack', handleAck)
+    socket.on('whiteboard-delete-ack', handleAck)
+    socket.on('whiteboard-clear-ack', handleAck)
 
     return () => {
       socket.off('whiteboard-init', handleInit)
@@ -81,12 +157,16 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       socket.off('whiteboard-update', handleUpdate)
       socket.off('whiteboard-delete', handleDelete)
       socket.off('whiteboard-clear', handleClear)
+      socket.off('whiteboard-add-ack', handleAck)
+      socket.off('whiteboard-update-ack', handleAck)
+      socket.off('whiteboard-delete-ack', handleAck)
+      socket.off('whiteboard-clear-ack', handleAck)
     }
   }, [socket])
 
   useEffect(() => {
     redrawCanvas()
-  }, [elements])
+  }, [elements, currentPath, startPoint, tool, color, strokeWidth])
 
   useEffect(() => {
     const resizeCanvas = () => {
@@ -194,6 +274,14 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     }
   }
 
+  const emitWithOpId = (eventName, payload) => {
+    const opId = uuidv4()
+    processedOpIdsRef.current.add(opId)
+    pendingLocalOpsRef.current.set(opId, payload)
+    socket.emit(eventName, { opId, ...payload })
+    return opId
+  }
+
   const handleCanvasMouseDown = (e) => {
     if (isReadOnly) return
 
@@ -278,17 +366,16 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           points: currentPath.points,
           color,
           strokeWidth,
-          created_by: userName,
+          createdBy: userName,
         }
 
         setElements(prev => {
-          const next = [...prev, newElement]
-          elementsRef.current = next
-          return next
+          if (prev.some(el => el.id === newElement.id)) return prev
+          return [...prev, newElement]
         })
 
         if (socket) {
-          socket.emit('whiteboard-add', newElement)
+          emitWithOpId('whiteboard-add', { element: newElement })
         }
       }
     } else if (tool === TOOLS.RECTANGLE || tool === TOOLS.CIRCLE) {
@@ -308,17 +395,16 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           height: h,
           color,
           strokeWidth,
-          created_by: userName,
+          createdBy: userName,
         }
 
         setElements(prev => {
-          const next = [...prev, newElement]
-          elementsRef.current = next
-          return next
+          if (prev.some(el => el.id === newElement.id)) return prev
+          return [...prev, newElement]
         })
 
         if (socket) {
-          socket.emit('whiteboard-add', newElement)
+          emitWithOpId('whiteboard-add', { element: newElement })
         }
       }
     }
@@ -331,8 +417,9 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
   const eraseAtPoint = (point) => {
     const eraseRadius = 15
     const elementsToRemove = []
+    const currentEls = elementsRef.current
 
-    elements.forEach(el => {
+    currentEls.forEach(el => {
       if (el.type === 'pen' || el.type === 'line') {
         for (const p of el.points) {
           const dist = Math.sqrt((p.x - point.x) ** 2 + (p.y - point.y) ** 2)
@@ -350,15 +437,11 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     })
 
     if (elementsToRemove.length > 0) {
-      setElements(prev => {
-        const next = prev.filter(el => !elementsToRemove.includes(el.id))
-        elementsRef.current = next
-        return next
-      })
+      setElements(prev => prev.filter(el => !elementsToRemove.includes(el.id)))
 
       if (socket) {
         elementsToRemove.forEach(id => {
-          socket.emit('whiteboard-delete', { elementId: id })
+          emitWithOpId('whiteboard-delete', { elementId: id })
         })
       }
     }
@@ -376,17 +459,16 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       height: 120,
       color: stickyColor,
       text: '',
-      created_by: userName,
+      createdBy: userName,
     }
 
     setElements(prev => {
-      const next = [...prev, newElement]
-      elementsRef.current = next
-      return next
+      if (prev.some(el => el.id === newElement.id)) return prev
+      return [...prev, newElement]
     })
 
     if (socket) {
-      socket.emit('whiteboard-add', newElement)
+      emitWithOpId('whiteboard-add', { element: newElement })
     }
   }
 
@@ -402,41 +484,41 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       height: 40,
       color,
       text: '双击编辑文字',
-      created_by: userName,
+      createdBy: userName,
     }
 
     setElements(prev => {
-      const next = [...prev, newElement]
-      elementsRef.current = next
-      return next
+      if (prev.some(el => el.id === newElement.id)) return prev
+      return [...prev, newElement]
     })
 
     if (socket) {
-      socket.emit('whiteboard-add', newElement)
+      emitWithOpId('whiteboard-add', { element: newElement })
     }
   }
 
   const updateElement = (element) => {
     setElements(prev => {
-      const next = prev.map(el => el.id === element.id ? element : el)
-      elementsRef.current = next
+      const idx = prev.findIndex(el => el.id === element.id)
+      if (idx === -1) return prev
+      const next = [...prev]
+      next[idx] = element
       return next
     })
 
     if (socket) {
-      socket.emit('whiteboard-update', element)
+      emitWithOpId('whiteboard-update', {
+        element,
+        baseVersion: serverVersionRef.current,
+      })
     }
   }
 
   const deleteElement = (elementId) => {
-    setElements(prev => {
-      const next = prev.filter(el => el.id !== elementId)
-      elementsRef.current = next
-      return next
-    })
+    setElements(prev => prev.filter(el => el.id !== elementId))
 
     if (socket) {
-      socket.emit('whiteboard-delete', { elementId })
+      emitWithOpId('whiteboard-delete', { elementId })
     }
   }
 
@@ -445,10 +527,9 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     if (!confirm('确定要清空白板吗？此操作不可撤销。')) return
 
     setElements([])
-    elementsRef.current = []
 
     if (socket) {
-      socket.emit('whiteboard-clear')
+      emitWithOpId('whiteboard-clear', {})
     }
   }
 
@@ -488,7 +569,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     const x = e.clientX - rect.left - dragOffset.x
     const y = e.clientY - rect.top - dragOffset.y
 
-    const element = elements.find(el => el.id === dragging)
+    const element = elementsRef.current.find(el => el.id === dragging)
     if (element) {
       const updated = { ...element, x: Math.max(0, x), y: Math.max(0, y) }
       updateElement(updated)
