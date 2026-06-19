@@ -34,8 +34,65 @@ function markOpProcessed(meetingId, opId) {
   }
 }
 
+function parseElement(el) {
+  return {
+    ...el,
+    points: el.points ? JSON.parse(el.points) : null,
+    strokeWidth: el.stroke_width,
+    createdBy: el.created_by,
+    imageUrl: el.image_url,
+    scale: el.scale || 1,
+    mentionedUsers: el.mentioned_users ? JSON.parse(el.mentioned_users) : [],
+  };
+}
+
 function setupWhiteboardSocket(io) {
   const meetingSockets = new Map();
+  const meetingUsers = new Map();
+
+  function getOnlineUsers(meetingId) {
+    const users = meetingUsers.get(meetingId);
+    if (!users) return [];
+    return Array.from(users.values()).map(u => ({ userId: u.userId, userName: u.userName }));
+  }
+
+  function sendMentionNotifications(meetingId, element, fromUserName) {
+    if (!element.mentionedUsers || element.mentionedUsers.length === 0) return;
+
+    const users = meetingUsers.get(meetingId);
+    if (!users) return;
+
+    element.mentionedUsers.forEach(userName => {
+      let targetSocketId = null;
+      for (const [sid, user] of users.entries()) {
+        if (user.userName === userName) {
+          targetSocketId = sid;
+          break;
+        }
+      }
+
+      const notification = {
+        id: Date.now() + Math.random(),
+        meetingId,
+        fromUser: fromUserName,
+        type: 'mention',
+        content: `${fromUserName} 在白板上@了你`,
+        elementId: element.id,
+        elementType: element.type,
+        isRead: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      db.prepare(`
+        INSERT INTO notifications (meeting_id, user_name, from_user, type, content, element_id, is_read)
+        VALUES (?, ?, ?, ?, ?, ?, 0)
+      `).run(meetingId, userName, fromUserName, 'mention', notification.content, element.id);
+
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('notification', notification);
+      }
+    });
+  }
 
   io.on('connection', (socket) => {
     console.log('用户连接:', socket.id);
@@ -58,6 +115,11 @@ function setupWhiteboardSocket(io) {
       }
       meetingSockets.get(meetingId).add(socket.id);
 
+      if (!meetingUsers.has(meetingId)) {
+        meetingUsers.set(meetingId, new Map());
+      }
+      meetingUsers.get(meetingId).set(socket.id, { userId, userName });
+
       const tx = db.transaction(() => {
         const vRow = db.prepare('SELECT version FROM meeting_versions WHERE meeting_id = ?').get(meetingId);
         const currentVersion = vRow ? vRow.version : 0;
@@ -68,27 +130,46 @@ function setupWhiteboardSocket(io) {
           ORDER BY created_at ASC
         `).all(meetingId);
 
-        const parsedElements = elements.map(el => ({
-          ...el,
-          points: el.points ? JSON.parse(el.points) : null,
-          strokeWidth: el.stroke_width,
-          createdBy: el.created_by,
+        const parsedElements = elements.map(parseElement);
+
+        const unreadNotifications = db.prepare(`
+          SELECT * FROM notifications
+          WHERE meeting_id = ? AND user_name = ? AND is_read = 0
+          ORDER BY created_at DESC
+        `).all(meetingId, userName).map(n => ({
+          id: n.id,
+          meetingId: n.meeting_id,
+          fromUser: n.from_user,
+          type: n.type,
+          content: n.content,
+          elementId: n.element_id,
+          isRead: n.is_read === 1,
+          createdAt: n.created_at,
         }));
 
-        return { currentVersion, parsedElements, meeting };
+        return { currentVersion, parsedElements, meeting, unreadNotifications };
       });
 
-      const { currentVersion, parsedElements, meeting: meetingData } = tx();
+      const { currentVersion, parsedElements, meeting: meetingData, unreadNotifications } = tx();
 
       socket.emit('whiteboard-init', {
         meeting: meetingData,
         elements: parsedElements,
         serverVersion: currentVersion,
         isReadOnly: meetingData.status === 'ended',
+        onlineUsers: getOnlineUsers(meetingId),
+        unreadNotifications,
       });
 
       const userCount = meetingSockets.get(meetingId).size;
       io.to(meetingId).emit('user-count', { count: userCount });
+      io.to(meetingId).emit('online-users', { users: getOnlineUsers(meetingId) });
+    });
+
+    socket.on('get-online-users', () => {
+      const meetingId = socket.meetingId;
+      if (!meetingId) return;
+      socket.emit('online-users', { users: getOnlineUsers(meetingId) });
     });
 
     socket.on('whiteboard-add', ({ opId, element }) => {
@@ -119,10 +200,11 @@ function setupWhiteboardSocket(io) {
         };
 
         const pointsStr = element.points ? JSON.stringify(element.points) : null;
+        const mentionedUsersStr = element.mentionedUsers ? JSON.stringify(element.mentionedUsers) : null;
 
         db.prepare(`
-          INSERT INTO whiteboard_elements (id, meeting_id, type, x, y, width, height, color, stroke_width, text, points, created_by, version)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO whiteboard_elements (id, meeting_id, type, x, y, width, height, color, stroke_width, text, points, image_url, scale, created_by, mentioned_users, version)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           element.id,
           meetingId,
@@ -135,11 +217,21 @@ function setupWhiteboardSocket(io) {
           element.strokeWidth || null,
           element.text || null,
           pointsStr,
+          element.imageUrl || null,
+          element.scale || 1,
           socket.userName || socket.userId,
+          mentionedUsersStr,
           version
         );
 
-        return { ...elementWithUser, strokeWidth: element.strokeWidth, createdBy: socket.userName || socket.userId };
+        return parseElement({
+          ...elementWithUser,
+          stroke_width: element.strokeWidth,
+          created_by: socket.userName || socket.userId,
+          image_url: element.imageUrl || null,
+          scale: element.scale || 1,
+          mentioned_users: mentionedUsersStr,
+        });
       });
 
       const result = tx();
@@ -150,6 +242,10 @@ function setupWhiteboardSocket(io) {
 
       if (opId) {
         markOpProcessed(meetingId, opId);
+      }
+
+      if (result.mentionedUsers && result.mentionedUsers.length > 0) {
+        sendMentionNotifications(meetingId, result, socket.userName || socket.userId);
       }
 
       socket.emit('whiteboard-add-ack', { opId, version: result.version, elementId: result.id });
@@ -176,17 +272,22 @@ function setupWhiteboardSocket(io) {
       }
 
       const tx = db.transaction(() => {
-        const existing = db.prepare('SELECT version FROM whiteboard_elements WHERE id = ? AND meeting_id = ?').get(element.id, meetingId);
+        const existing = db.prepare('SELECT version, mentioned_users FROM whiteboard_elements WHERE id = ? AND meeting_id = ?').get(element.id, meetingId);
         if (!existing) {
           return null;
         }
 
         const newVersion = getNextVersion(meetingId);
         const pointsStr = element.points ? JSON.stringify(element.points) : null;
+        const mentionedUsersStr = element.mentionedUsers ? JSON.stringify(element.mentionedUsers) : null;
+
+        const oldMentions = existing.mentioned_users ? JSON.parse(existing.mentioned_users) : [];
+        const newMentions = element.mentionedUsers || [];
+        const addedMentions = newMentions.filter(u => !oldMentions.includes(u));
 
         const info = db.prepare(`
           UPDATE whiteboard_elements
-          SET x = ?, y = ?, width = ?, height = ?, color = ?, stroke_width = ?, text = ?, points = ?, version = ?, updated_at = CURRENT_TIMESTAMP
+          SET x = ?, y = ?, width = ?, height = ?, color = ?, stroke_width = ?, text = ?, points = ?, image_url = ?, scale = ?, mentioned_users = ?, version = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ? AND meeting_id = ?
         `).run(
           element.x,
@@ -197,6 +298,9 @@ function setupWhiteboardSocket(io) {
           element.strokeWidth || null,
           element.text || null,
           pointsStr,
+          element.imageUrl || null,
+          element.scale || 1,
+          mentionedUsersStr,
           newVersion,
           element.id,
           meetingId
@@ -206,11 +310,16 @@ function setupWhiteboardSocket(io) {
           return null;
         }
 
-        return {
+        const parsed = parseElement({
           ...element,
+          stroke_width: element.strokeWidth,
+          image_url: element.imageUrl,
+          scale: element.scale || 1,
+          mentioned_users: mentionedUsersStr,
           version: newVersion,
-          strokeWidth: element.strokeWidth,
-        };
+        });
+
+        return { parsed, addedMentions };
       });
 
       const result = tx();
@@ -223,12 +332,17 @@ function setupWhiteboardSocket(io) {
         markOpProcessed(meetingId, opId);
       }
 
-      socket.emit('whiteboard-update-ack', { opId, version: result.version, elementId: result.id });
+      if (result.addedMentions.length > 0) {
+        const elementForNotify = { ...result.parsed, mentionedUsers: result.addedMentions };
+        sendMentionNotifications(meetingId, elementForNotify, socket.userName || socket.userId);
+      }
+
+      socket.emit('whiteboard-update-ack', { opId, version: result.parsed.version, elementId: result.parsed.id });
 
       socket.to(meetingId).emit('whiteboard-update', {
         opId,
-        version: result.version,
-        element: result,
+        version: result.parsed.version,
+        element: result.parsed,
       });
     });
 
@@ -301,6 +415,24 @@ function setupWhiteboardSocket(io) {
       });
     });
 
+    socket.on('mark-notification-read', ({ notificationId }) => {
+      const meetingId = socket.meetingId;
+      if (!meetingId || !socket.userName) return;
+
+      db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_name = ?').run(notificationId, socket.userName);
+
+      socket.emit('notification-read', { notificationId });
+    });
+
+    socket.on('mark-all-notifications-read', () => {
+      const meetingId = socket.meetingId;
+      if (!meetingId || !socket.userName) return;
+
+      db.prepare('UPDATE notifications SET is_read = 1 WHERE meeting_id = ? AND user_name = ?').run(meetingId, socket.userName);
+
+      socket.emit('all-notifications-read');
+    });
+
     socket.on('disconnect', () => {
       console.log('用户断开:', socket.id);
       const meetingId = socket.meetingId;
@@ -308,11 +440,17 @@ function setupWhiteboardSocket(io) {
       if (meetingId && meetingSockets.has(meetingId)) {
         meetingSockets.get(meetingId).delete(socket.id);
 
+        if (meetingUsers.has(meetingId)) {
+          meetingUsers.get(meetingId).delete(socket.id);
+        }
+
         const userCount = meetingSockets.get(meetingId).size;
         io.to(meetingId).emit('user-count', { count: userCount });
+        io.to(meetingId).emit('online-users', { users: getOnlineUsers(meetingId) });
 
         if (userCount === 0) {
           meetingSockets.delete(meetingId);
+          meetingUsers.delete(meetingId);
         }
       }
     });

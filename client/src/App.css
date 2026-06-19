@@ -552,3 +552,285 @@
   margin-bottom: 16px;
   font-size: 14px;
 }
+
+.notification-wrapper {
+  position: relative;
+}
+
+.notification-btn {
+  width: 40px;
+  height: 40px;
+  border: none;
+  background: #f0f2ff;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  position: relative;
+  transition: background 0.2s;
+}
+
+.notification-btn:hover {
+  background: #e0e4ff;
+}
+
+.notification-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: #e74c3c;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.notification-panel {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  width: 320px;
+  max-height: 400px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.notification-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid #e9ecef;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.notification-mark-all {
+  font-size: 12px;
+  color: #667eea;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.notification-mark-all:hover {
+  text-decoration: underline;
+}
+
+.notification-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 340px;
+}
+
+.notification-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: #999;
+  font-size: 14px;
+}
+
+.notification-item {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.notification-item:hover {
+  background: #f8f9fa;
+}
+
+.notification-item.unread {
+  background: #f0f7ff;
+}
+
+.notification-dot {
+  width: 8px;
+  height: 8px;
+  background: #e74c3c;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+
+.notification-item.read .notification-dot {
+  background: #ccc;
+}
+
+.notification-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.notification-from {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1a1a2e;
+  margin-bottom: 2px;
+}
+
+.notification-text {
+  font-size: 13px;
+  color: #57606f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notification-time {
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.whiteboard-image {
+  position: absolute;
+  cursor: move;
+  box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.whiteboard-image img {
+  display: block;
+  pointer-events: none;
+}
+
+.resize-handle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  background: #667eea;
+  border: 2px solid white;
+  border-radius: 50%;
+  cursor: nwse-resize;
+  z-index: 10;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.resize-handle-br {
+  bottom: -8px;
+  right: -8px;
+}
+
+.mention-picker {
+  position: absolute;
+  top: 60px;
+  left: 16px;
+  width: 240px;
+  background: white;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.mention-picker-header {
+  padding: 12px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: 1px solid #e9ecef;
+  background: #f8f9fa;
+}
+
+.mention-empty {
+  padding: 30px 16px;
+  text-align: center;
+  color: #999;
+  font-size: 13px;
+}
+
+.mention-user-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.mention-user-item:hover {
+  background: #f0f2ff;
+}
+
+.mention-user-avatar {
+  font-size: 20px;
+}
+
+.mention-user-name {
+  font-size: 14px;
+  color: #1a1a2e;
+}
+
+.mention-picker-footer {
+  padding: 10px 16px;
+  border-top: 1px solid #e9ecef;
+  text-align: right;
+}
+
+.mention-picker-footer button {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mention-picker-footer button:hover {
+  color: #667eea;
+}
+
+.mention-on-element {
+  position: absolute;
+  top: 4px;
+  right: 36px;
+  background: #667eea;
+  color: white;
+  border: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.9;
+  transition: opacity 0.2s;
+}
+
+.mention-on-element:hover {
+  opacity: 1;
+}
+
+.element-mention-badge {
+  position: absolute;
+  bottom: -8px;
+  right: -8px;
+  background: #e74c3c;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  z-index: 5;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}

@@ -8,6 +8,8 @@ const TOOLS = {
   CIRCLE: 'circle',
   TEXT: 'text',
   STICKY: 'sticky',
+  IMAGE: 'image',
+  MENTION: 'mention',
   ERASER: 'eraser',
   SELECT: 'select',
 }
@@ -16,9 +18,12 @@ const COLORS = ['#1a1a2e', '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6'
 const STICKY_COLORS = ['#fff59d', '#f8bbd0', '#90caf9', '#a5d6a7']
 const STROKE_WIDTHS = [2, 4, 6, 8]
 
-function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
+const API_BASE = 'http://localhost:3001/api'
+
+function Whiteboard({ socket, meetingId, isReadOnly, userName, onlineUsers = [] }) {
   const canvasRef = useRef(null)
   const containerRef = useRef(null)
+  const fileInputRef = useRef(null)
   const [tool, setTool] = useState(TOOLS.PEN)
   const [color, setColor] = useState('#1a1a2e')
   const [strokeWidth, setStrokeWidth] = useState(4)
@@ -30,6 +35,11 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
   const [selectedElement, setSelectedElement] = useState(null)
   const [dragging, setDragging] = useState(null)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  const [resizing, setResizing] = useState(null)
+  const [resizeStart, setResizeStart] = useState(null)
+  const [showMentionPicker, setShowMentionPicker] = useState(false)
+  const [mentionTargetId, setMentionTargetId] = useState(null)
+  const [uploading, setUploading] = useState(false)
   const elementsRef = useRef([])
   const serverVersionRef = useRef(0)
   const initializedRef = useRef(false)
@@ -223,6 +233,20 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           0, 0, 2 * Math.PI
         )
         ctx.stroke()
+      } else if (el.type === 'image' && el.imageUrl) {
+        const img = new window.Image()
+        img.crossOrigin = 'anonymous'
+        img.src = el.imageUrl.startsWith('http') ? el.imageUrl : `http://localhost:3001${el.imageUrl}`
+        const scale = el.scale || 1
+        const w = (el.width || 200) * scale
+        const h = (el.height || 150) * scale
+        if (img.complete) {
+          ctx.drawImage(img, el.x, el.y, w, h)
+        } else {
+          img.onload = () => {
+            ctx.drawImage(img, el.x, el.y, w, h)
+          }
+        }
       }
     })
 
@@ -315,6 +339,9 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       })
     } else if (tool === TOOLS.ERASER) {
       eraseAtPoint(point)
+    } else if (tool === TOOLS.MENTION) {
+      setMentionTargetId(null)
+      setShowMentionPicker(true)
     }
   }
 
@@ -367,6 +394,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           color,
           strokeWidth,
           createdBy: userName,
+          mentionedUsers: [],
         }
 
         setElements(prev => {
@@ -396,6 +424,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           color,
           strokeWidth,
           createdBy: userName,
+          mentionedUsers: [],
         }
 
         setElements(prev => {
@@ -428,9 +457,11 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
             break
           }
         }
-      } else if (el.type === 'rectangle' || el.type === 'circle') {
-        if (point.x >= el.x - eraseRadius && point.x <= el.x + el.width + eraseRadius &&
-            point.y >= el.y - eraseRadius && point.y <= el.y + el.height + eraseRadius) {
+      } else if (el.type === 'rectangle' || el.type === 'circle' || el.type === 'image') {
+        const w = el.type === 'image' ? (el.width || 200) * (el.scale || 1) : el.width
+        const h = el.type === 'image' ? (el.height || 150) * (el.scale || 1) : el.height
+        if (point.x >= el.x - eraseRadius && point.x <= el.x + w + eraseRadius &&
+            point.y >= el.y - eraseRadius && point.y <= el.y + h + eraseRadius) {
           elementsToRemove.push(el.id)
         }
       }
@@ -443,6 +474,74 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
         elementsToRemove.forEach(id => {
           emitWithOpId('whiteboard-delete', { elementId: id })
         })
+      }
+    }
+  }
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file || isReadOnly) return
+
+    setUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('image', file)
+
+      const res = await fetch(`${API_BASE}/uploads/image`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) throw new Error('上传失败')
+      const data = await res.json()
+
+      const img = new window.Image()
+      img.src = data.url.startsWith('http') ? data.url : `http://localhost:3001${data.url}`
+
+      img.onload = () => {
+        const aspectRatio = img.width / img.height
+        const maxW = 300
+        const maxH = 300
+        let w = img.width
+        let h = img.height
+        if (w > maxW) {
+          w = maxW
+          h = w / aspectRatio
+        }
+        if (h > maxH) {
+          h = maxH
+          w = h * aspectRatio
+        }
+
+        const newElement = {
+          id: uuidv4(),
+          type: 'image',
+          x: 100 + Math.random() * 100,
+          y: 100 + Math.random() * 100,
+          width: w,
+          height: h,
+          imageUrl: data.url,
+          scale: 1,
+          createdBy: userName,
+          mentionedUsers: [],
+        }
+
+        setElements(prev => {
+          if (prev.some(el => el.id === newElement.id)) return prev
+          return [...prev, newElement]
+        })
+
+        if (socket) {
+          emitWithOpId('whiteboard-add', { element: newElement })
+        }
+      }
+    } catch (err) {
+      console.error('图片上传失败:', err)
+      alert('图片上传失败')
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
       }
     }
   }
@@ -460,6 +559,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       color: stickyColor,
       text: '',
       createdBy: userName,
+      mentionedUsers: [],
     }
 
     setElements(prev => {
@@ -485,6 +585,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
       color,
       text: '双击编辑文字',
       createdBy: userName,
+      mentionedUsers: [],
     }
 
     setElements(prev => {
@@ -533,6 +634,85 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     }
   }
 
+  const handleImageMouseDown = (e, element) => {
+    if (isReadOnly) return
+    e.preventDefault()
+    e.stopPropagation()
+
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const scale = element.scale || 1
+    const w = (element.width || 200) * scale
+    const h = (element.height || 150) * scale
+
+    if (x >= w - 15 && y >= h - 15) {
+      setResizing(element.id)
+      setResizeStart({
+        startX: e.clientX,
+        startY: e.clientY,
+        startScale: scale,
+        startWidth: element.width || 200,
+        startHeight: element.height || 150,
+      })
+    } else {
+      setDragging(element.id)
+      setDragOffset({ x, y })
+    }
+    setSelectedElement(element.id)
+  }
+
+  const handleContainerMouseMove = (e) => {
+    if (!dragging && !resizing) return
+    if (isReadOnly) return
+
+    const container = containerRef.current
+    const rect = container.getBoundingClientRect()
+
+    if (resizing) {
+      const element = elementsRef.current.find(el => el.id === resizing)
+      if (element && resizeStart) {
+        const dx = e.clientX - resizeStart.startX
+        const dy = e.clientY - resizeStart.startY
+        const delta = Math.max(dx, dy)
+        const newScale = Math.max(0.2, Math.min(5, resizeStart.startScale + delta / 200))
+        const updated = { ...element, scale: newScale }
+        setElements(prev => prev.map(el => el.id === resizing ? updated : el))
+      }
+    } else if (dragging) {
+      const x = e.clientX - rect.left - dragOffset.x
+      const y = e.clientY - rect.top - dragOffset.y
+      const element = elementsRef.current.find(el => el.id === dragging)
+      if (element) {
+        const updated = { ...element, x: Math.max(0, x), y: Math.max(0, y) }
+        setElements(prev => prev.map(el => el.id === dragging ? updated : el))
+      }
+    }
+  }
+
+  const handleContainerMouseUp = () => {
+    if (resizing) {
+      const element = elementsRef.current.find(el => el.id === resizing)
+      if (element && socket) {
+        emitWithOpId('whiteboard-update', {
+          element,
+          baseVersion: serverVersionRef.current,
+        })
+      }
+      setResizing(null)
+      setResizeStart(null)
+    } else if (dragging) {
+      const element = elementsRef.current.find(el => el.id === dragging)
+      if (element && socket) {
+        emitWithOpId('whiteboard-update', {
+          element,
+          baseVersion: serverVersionRef.current,
+        })
+      }
+      setDragging(null)
+    }
+  }
+
   const handleStickyMouseDown = (e, element) => {
     if (isReadOnly) return
     if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return
@@ -540,6 +720,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     e.preventDefault()
     setDragging(element.id)
     const rect = e.currentTarget.getBoundingClientRect()
+    const containerRect = containerRef.current.getBoundingClientRect()
     setDragOffset({
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
@@ -554,6 +735,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     e.preventDefault()
     setDragging(element.id)
     const rect = e.currentTarget.getBoundingClientRect()
+    const containerRect = containerRef.current.getBoundingClientRect()
     setDragOffset({
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
@@ -561,27 +743,50 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
     setSelectedElement(element.id)
   }
 
-  const handleContainerMouseMove = (e) => {
-    if (!dragging || isReadOnly) return
-
-    const container = containerRef.current
-    const rect = container.getBoundingClientRect()
-    const x = e.clientX - rect.left - dragOffset.x
-    const y = e.clientY - rect.top - dragOffset.y
-
-    const element = elementsRef.current.find(el => el.id === dragging)
-    if (element) {
-      const updated = { ...element, x: Math.max(0, x), y: Math.max(0, y) }
-      updateElement(updated)
+  const handleMentionSelect = (mentionedUserName) => {
+    if (!selectedElement && !mentionTargetId) {
+      const newNote = {
+        id: uuidv4(),
+        type: 'sticky',
+        x: 150 + Math.random() * 100,
+        y: 150 + Math.random() * 100,
+        width: 180,
+        height: 120,
+        color: '#f8bbd0',
+        text: `@${mentionedUserName} 请注意查看`,
+        createdBy: userName,
+        mentionedUsers: [mentionedUserName],
+      }
+      setElements(prev => {
+        if (prev.some(el => el.id === newNote.id)) return prev
+        return [...prev, newNote]
+      })
+      if (socket) {
+        emitWithOpId('whiteboard-add', { element: newNote })
+      }
+    } else {
+      const targetId = mentionTargetId || selectedElement
+      const element = elementsRef.current.find(el => el.id === targetId)
+      if (element) {
+        const existingMentions = element.mentionedUsers || []
+        if (!existingMentions.includes(mentionedUserName)) {
+          const updated = {
+            ...element,
+            mentionedUsers: [...existingMentions, mentionedUserName],
+          }
+          updateElement(updated)
+        }
+      }
     }
+    setShowMentionPicker(false)
+    setMentionTargetId(null)
   }
 
-  const handleContainerMouseUp = () => {
-    setDragging(null)
-  }
-
+  const imageElements = elements.filter(el => el.type === 'image')
   const stickyElements = elements.filter(el => el.type === 'sticky')
   const textElements = elements.filter(el => el.type === 'text')
+
+  const otherUsers = onlineUsers.filter(u => u.userName !== userName)
 
   return (
     <div
@@ -657,6 +862,32 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
         >
           📝
         </button>
+        <button
+          className={`tool-btn ${tool === TOOLS.IMAGE ? 'active' : ''}`}
+          onClick={() => fileInputRef.current?.click()}
+          title="上传图片"
+          disabled={isReadOnly || uploading}
+        >
+          🖼️
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: 'none' }}
+          onChange={handleImageUpload}
+        />
+        <button
+          className={`tool-btn ${tool === TOOLS.MENTION ? 'active' : ''}`}
+          onClick={() => {
+            setTool(TOOLS.MENTION)
+            setShowMentionPicker(true)
+          }}
+          title="@提醒"
+          disabled={isReadOnly}
+        >
+          @
+        </button>
 
         <div className="tool-divider" />
 
@@ -713,6 +944,31 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
         </button>
       </div>
 
+      {showMentionPicker && (
+        <div className="mention-picker">
+          <div className="mention-picker-header">选择要@的人</div>
+          {otherUsers.length === 0 ? (
+            <div className="mention-empty">暂无其他在线用户</div>
+          ) : (
+            otherUsers.map(u => (
+              <div
+                key={u.userId}
+                className="mention-user-item"
+                onClick={() => handleMentionSelect(u.userName)}
+              >
+                <span className="mention-user-avatar">👤</span>
+                <span className="mention-user-name">{u.userName}</span>
+              </div>
+            ))
+          )}
+          <div className="mention-picker-footer">
+            <button onClick={() => { setShowMentionPicker(false); setMentionTargetId(null) }}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
       <canvas
         ref={canvasRef}
         className="whiteboard-canvas"
@@ -723,6 +979,61 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
         style={{ cursor: isReadOnly ? 'default' : tool === TOOLS.ERASER ? 'cell' : 'crosshair' }}
       />
 
+      {imageElements.map(element => {
+        const scale = element.scale || 1
+        const w = (element.width || 200) * scale
+        const h = (element.height || 150) * scale
+        return (
+          <div
+            key={element.id}
+            className={`whiteboard-image ${selectedElement === element.id ? 'selected' : ''}`}
+            style={{
+              left: element.x,
+              top: element.y,
+              width: w,
+              height: h,
+              border: selectedElement === element.id ? '2px dashed #667eea' : 'none',
+            }}
+            onMouseDown={(e) => handleImageMouseDown(e, element)}
+          >
+            <img
+              src={element.imageUrl?.startsWith('http') ? element.imageUrl : `http://localhost:3001${element.imageUrl}`}
+              alt=""
+              draggable={false}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' }}
+            />
+            {!isReadOnly && selectedElement === element.id && (
+              <>
+                <div className="resize-handle resize-handle-br" />
+                <button
+                  className="sticky-note-delete"
+                  onClick={(e) => { e.stopPropagation(); deleteElement(element.id) }}
+                  title="删除图片"
+                >
+                  ✕
+                </button>
+                <button
+                  className="mention-on-element"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setMentionTargetId(element.id)
+                    setShowMentionPicker(true)
+                  }}
+                  title="@提醒他人"
+                >
+                  @
+                </button>
+              </>
+            )}
+            {element.mentionedUsers && element.mentionedUsers.length > 0 && (
+              <div className="element-mention-badge">
+                @{element.mentionedUsers.length}
+              </div>
+            )}
+          </div>
+        )
+      })}
+
       {textElements.map(element => (
         <TextElement
           key={element.id}
@@ -732,6 +1043,7 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           onMouseDown={(e) => handleTextMouseDown(e, element)}
           onUpdate={updateElement}
           onDelete={deleteElement}
+          onMention={() => { setMentionTargetId(element.id); setShowMentionPicker(true) }}
         />
       ))}
 
@@ -744,13 +1056,14 @@ function Whiteboard({ socket, meetingId, isReadOnly, userName }) {
           onMouseDown={(e) => handleStickyMouseDown(e, element)}
           onUpdate={updateElement}
           onDelete={deleteElement}
+          onMention={() => { setMentionTargetId(element.id); setShowMentionPicker(true) }}
         />
       ))}
     </div>
   )
 }
 
-function TextElement({ element, isReadOnly, isSelected, onMouseDown, onUpdate, onDelete }) {
+function TextElement({ element, isReadOnly, isSelected, onMouseDown, onUpdate, onDelete, onMention }) {
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(element.text)
   const inputRef = useRef(null)
@@ -826,19 +1139,33 @@ function TextElement({ element, isReadOnly, isSelected, onMouseDown, onUpdate, o
         text || '双击编辑文字'
       )}
       {!isReadOnly && isSelected && !editing && (
-        <button
-          className="sticky-note-delete"
-          onClick={handleDelete}
-          title="删除"
-        >
-          ✕
-        </button>
+        <>
+          <button
+            className="sticky-note-delete"
+            onClick={handleDelete}
+            title="删除"
+          >
+            ✕
+          </button>
+          <button
+            className="mention-on-element"
+            onClick={(e) => { e.stopPropagation(); onMention() }}
+            title="@提醒他人"
+          >
+            @
+          </button>
+        </>
+      )}
+      {element.mentionedUsers && element.mentionedUsers.length > 0 && (
+        <div className="element-mention-badge">
+          @{element.mentionedUsers.length}
+        </div>
       )}
     </div>
   )
 }
 
-function StickyNote({ element, isReadOnly, isSelected, onMouseDown, onUpdate, onDelete }) {
+function StickyNote({ element, isReadOnly, isSelected, onMouseDown, onUpdate, onDelete, onMention }) {
   const [text, setText] = useState(element.text)
   const textareaRef = useRef(null)
 
@@ -881,13 +1208,27 @@ function StickyNote({ element, isReadOnly, isSelected, onMouseDown, onUpdate, on
       onMouseDown={onMouseDown}
     >
       {!isReadOnly && (
-        <button
-          className="sticky-note-delete"
-          onClick={handleDelete}
-          title="删除便签"
-        >
-          ✕
-        </button>
+        <>
+          <button
+            className="sticky-note-delete"
+            onClick={handleDelete}
+            title="删除便签"
+          >
+            ✕
+          </button>
+          <button
+            className="mention-on-element"
+            onClick={(e) => { e.stopPropagation(); onMention() }}
+            title="@提醒他人"
+          >
+            @
+          </button>
+        </>
+      )}
+      {element.mentionedUsers && element.mentionedUsers.length > 0 && (
+        <div className="element-mention-badge">
+          @{element.mentionedUsers.length}
+        </div>
       )}
       <textarea
         ref={textareaRef}

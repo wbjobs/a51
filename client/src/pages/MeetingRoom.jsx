@@ -16,12 +16,17 @@ function MeetingRoom() {
   const [userCount, setUserCount] = useState(0)
   const [isReadOnly, setIsReadOnly] = useState(false)
   const [socketReady, setSocketReady] = useState(false)
+  const [onlineUsers, setOnlineUsers] = useState([])
+  const [notifications, setNotifications] = useState([])
+  const [showNotifications, setShowNotifications] = useState(false)
+  const notifRef = useRef(null)
   const socketRef = useRef(null)
   const [userName] = useState(() => {
     const saved = localStorage.getItem('userName')
     return saved || `用户${Math.floor(Math.random() * 1000)}`
   })
   const userIdRef = useRef(uuidv4())
+  const unreadCount = notifications.filter(n => !n.isRead).length
 
   useEffect(() => {
     fetchMeeting()
@@ -66,6 +71,31 @@ function MeetingRoom() {
       setUserCount(count)
     })
 
+    socket.on('online-users', ({ users }) => {
+      setOnlineUsers(users)
+    })
+
+    socket.on('notification', (notif) => {
+      setNotifications(prev => [notif, ...prev])
+    })
+
+    socket.on('notification-read', ({ notificationId }) => {
+      setNotifications(prev => prev.map(n => n.id === notificationId ? { ...n, isRead: true } : n))
+    })
+
+    socket.on('all-notifications-read', () => {
+      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })))
+    })
+
+    socket.on('whiteboard-init', (data) => {
+      if (data.unreadNotifications) {
+        setNotifications(data.unreadNotifications)
+      }
+      if (data.onlineUsers) {
+        setOnlineUsers(data.onlineUsers)
+      }
+    })
+
     socket.on('error', (err) => {
       console.error('Socket错误:', err)
     })
@@ -75,6 +105,23 @@ function MeetingRoom() {
       setSocketReady(false)
     }
   }, [meeting, id, userName])
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (notifRef.current && !notifRef.current.contains(e.target)) {
+        setShowNotifications(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const markAllRead = () => {
+    if (socketRef.current) {
+      socketRef.current.emit('mark-all-notifications-read')
+    }
+    setNotifications(prev => prev.map(n => ({ ...n, isRead: true })))
+  }
 
   const endMeeting = async () => {
     if (!confirm('确定要结束会议吗？结束后白板将变为只读状态。')) return
@@ -129,10 +176,58 @@ function MeetingRoom() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div className="user-count-badge">
+          <div className="user-count-badge" title={onlineUsers.map(u => u.userName).join(', ')}>
             <span>👥</span>
             <span>{userCount} 人在线</span>
           </div>
+
+          <div className="notification-wrapper" ref={notifRef}>
+            <button
+              className="notification-btn"
+              onClick={() => setShowNotifications(!showNotifications)}
+              title="通知"
+            >
+              🔔
+              {unreadCount > 0 && (
+                <span className="notification-badge">{unreadCount > 99 ? '99+' : unreadCount}</span>
+              )}
+            </button>
+
+            {showNotifications && (
+              <div className="notification-panel">
+                <div className="notification-header">
+                  <span>通知</span>
+                  {unreadCount > 0 && (
+                    <button className="notification-mark-all" onClick={markAllRead}>
+                      全部已读
+                    </button>
+                  )}
+                </div>
+                <div className="notification-list">
+                  {notifications.length === 0 ? (
+                    <div className="notification-empty">暂无通知</div>
+                  ) : (
+                    notifications.map(n => (
+                      <div
+                        key={n.id}
+                        className={`notification-item ${n.isRead ? 'read' : 'unread'}`}
+                      >
+                        <div className="notification-dot"></div>
+                        <div className="notification-content">
+                          <div className="notification-from">{n.fromUser}</div>
+                          <div className="notification-text">{n.content}</div>
+                          <div className="notification-time">
+                            {new Date(n.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           {isReadOnly && (
             <div className="read-only-badge">
               📋 已归档（只读）
@@ -156,6 +251,7 @@ function MeetingRoom() {
             meetingId={id}
             isReadOnly={isReadOnly}
             userName={userName}
+            onlineUsers={onlineUsers}
           />
         ) : (
           <div className="loading">连接中...</div>
